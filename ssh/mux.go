@@ -6,6 +6,7 @@ package ssh
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -90,6 +91,7 @@ type mux struct {
 	chanList chanList
 
 	incomingChannels chan NewChannel
+	incomingPackets  chan []byte
 
 	globalSentMu     sync.Mutex
 	globalResponses  chan interface{}
@@ -114,19 +116,45 @@ func (m *mux) Wait() error {
 
 // newMux returns a mux that runs over the given connection.
 func newMux(p packetConn) *mux {
+	return newMux2(p, false)
+}
+
+func newMux2(p packetConn, rawPackets bool) *mux {
 	m := &mux{
 		conn:             p,
-		incomingChannels: make(chan NewChannel, chanSize),
 		globalResponses:  make(chan interface{}, 1),
 		incomingRequests: make(chan *Request, chanSize),
 		errCond:          newCond(),
 	}
+
+	if rawPackets {
+		m.incomingPackets = make(chan []byte, chanSize)
+	} else {
+		m.incomingChannels = make(chan NewChannel, chanSize)
+	}
+
 	if debugMux {
 		m.chanList.offset = atomic.AddUint32(&globalOff, 1)
 	}
 
 	go m.loop()
 	return m
+}
+
+func (m *mux) isRaw() bool {
+	return m.incomingPackets != nil
+}
+
+var (
+	errRawMode   = errors.New("unavailable in raw packets mode")
+	errNoRawMode = errors.New("only available in raw packets mode")
+)
+
+func (m *mux) WritePacket(packet []byte) error {
+	if !m.isRaw() {
+		return errNoRawMode
+	}
+	return m.conn.writePacket(packet)
 }
 
 func (m *mux) sendMessage(msg interface{}) error {
@@ -194,7 +222,11 @@ func (m *mux) loop() {
 		ch.close()
 	}
 
-	close(m.incomingChannels)
+	if m.isRaw() {
+		close(m.incomingPackets)
+	} else {
+		close(m.incomingChannels)
+	}
 	close(m.incomingRequests)
 	close(m.globalResponses)
 
@@ -228,7 +260,9 @@ func (m *mux) onePacket() error {
 
 	switch packet[0] {
 	case msgChannelOpen:
-		return m.handleChannelOpen(packet)
+		if !m.isRaw() {
+			return m.handleChannelOpen(packet)
+		}
 	case msgGlobalRequest, msgRequestSuccess, msgRequestFailure:
 		return m.handleGlobalPacket(packet)
 	case msgPing:
@@ -237,6 +271,11 @@ func (m *mux) onePacket() error {
 			return fmt.Errorf("failed to unmarshal ping@openssh.com message: %w", err)
 		}
 		return m.sendMessage(pongMsg(msg))
+	}
+
+	if m.isRaw() {
+		m.incomingPackets <- packet
+		return nil
 	}
 
 	// assume a channel packet.
@@ -310,6 +349,10 @@ func (m *mux) OpenChannel(chanType string, extra []byte) (Channel, <-chan *Reque
 }
 
 func (m *mux) openChannel(chanType string, extra []byte) (*channel, error) {
+	if m.isRaw() {
+		return nil, errRawMode
+	}
+
 	ch := m.newChannel(chanType, channelOutbound, extra)
 
 	ch.maxIncomingPayload = channelMaxPacket

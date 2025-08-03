@@ -237,6 +237,16 @@ type ServerConn struct {
 // The returned error may be of type *ServerAuthError for
 // authentication errors.
 func NewServerConn(c net.Conn, config *ServerConfig) (*ServerConn, <-chan NewChannel, <-chan *Request, error) {
+	conn, channels, _, requests, err := newServerConn(c, config, false)
+	return conn, channels, requests, err
+}
+
+func NewRawServerConn(c net.Conn, config *ServerConfig) (*ServerConn, <-chan []byte, <-chan *Request, error) {
+	conn, _, packets, requests, err := newServerConn(c, config, true)
+	return conn, packets, requests, err
+}
+
+func newServerConn(c net.Conn, config *ServerConfig, raw bool) (*ServerConn, <-chan NewChannel, <-chan []byte, <-chan *Request, error) {
 	fullConf := *config
 	fullConf.SetDefaults()
 	if fullConf.MaxAuthTries == 0 {
@@ -248,7 +258,7 @@ func NewServerConn(c net.Conn, config *ServerConfig) (*ServerConn, <-chan NewCha
 		for _, algo := range fullConf.PublicKeyAuthAlgorithms {
 			if !contains(SupportedAlgorithms().PublicKeyAuths, algo) && !contains(InsecureAlgorithms().PublicKeyAuths, algo) {
 				c.Close()
-				return nil, nil, nil, fmt.Errorf("ssh: unsupported public key authentication algorithm %s", algo)
+				return nil, nil, nil, nil, fmt.Errorf("ssh: unsupported public key authentication algorithm %s", algo)
 			}
 		}
 	}
@@ -256,12 +266,12 @@ func NewServerConn(c net.Conn, config *ServerConfig) (*ServerConn, <-chan NewCha
 	s := &connection{
 		sshConn: sshConn{conn: c},
 	}
-	perms, err := s.serverHandshake(&fullConf)
+	perms, err := s.serverHandshake(&fullConf, raw)
 	if err != nil {
 		c.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return &ServerConn{s, perms}, s.mux.incomingChannels, s.mux.incomingRequests, nil
+	return &ServerConn{s, perms}, s.mux.incomingChannels, s.mux.incomingPackets, s.mux.incomingRequests, nil
 }
 
 // signAndMarshal signs the data with the appropriate algorithm,
@@ -277,7 +287,7 @@ func signAndMarshal(k AlgorithmSigner, rand io.Reader, data []byte, algo string)
 }
 
 // handshake performs key exchange and user authentication.
-func (s *connection) serverHandshake(config *ServerConfig) (*Permissions, error) {
+func (s *connection) serverHandshake(config *ServerConfig, rawMux bool) (*Permissions, error) {
 	if len(config.hostKeys) == 0 {
 		return nil, errors.New("ssh: server has no host keys")
 	}
@@ -333,7 +343,7 @@ func (s *connection) serverHandshake(config *ServerConfig) (*Permissions, error)
 	if err != nil {
 		return nil, err
 	}
-	s.mux = newMux(s.transport)
+	s.mux = newMux2(s.transport, rawMux)
 	return perms, err
 }
 

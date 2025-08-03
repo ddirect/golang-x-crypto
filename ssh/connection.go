@@ -69,6 +69,8 @@ type Conn interface {
 	// error causing the shutdown.
 	Wait() error
 
+	// Write a packet (only in raw mode)
+	WritePacket([]byte) error
 	// TODO(hanwen): consider exposing:
 	//   RequestKeyChange
 	//   Disconnect
