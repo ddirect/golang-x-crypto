@@ -249,6 +249,14 @@ func (m *mux) onePacket() error {
 		return err
 	}
 
+	// notify with an empty packet if it gets processed here
+	var rawPacket []byte
+	if m.isRaw() {
+		defer func() {
+			m.incomingPackets <- rawPacket
+		}()
+	}
+
 	if debugMux {
 		if packet[0] == msgChannelData || packet[0] == msgChannelExtendedData {
 			log.Printf("decoding(%d): data packet - %d bytes", m.chanList.offset, len(packet))
@@ -274,7 +282,7 @@ func (m *mux) onePacket() error {
 	}
 
 	if m.isRaw() {
-		m.incomingPackets <- packet
+		rawPacket = packet
 		return nil
 	}
 
